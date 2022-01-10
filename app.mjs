@@ -132,7 +132,8 @@ async function parseTetraPost(data) {
                 email = "";
                 break;
             case "DATE":
-                timestamp = value;
+                // left-pad to nodebb: format millis since epoche
+                timestamp = value.padEnd(13, '0');
                 break;
             case "IP_ADDRESS":
                 // ignore
