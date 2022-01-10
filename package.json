@@ -1,0 +1,26 @@
+{
+  "name": "tetrabb-to-nodebb",
+  "version": "1.0.0",
+  "description": "Migration scripts from TetraBB to NodeBB",
+  "main": "index.mjs",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "NodeBB",
+    "migration",
+    "TetraBB"
+  ],
+  "author": "Thoni",
+  "license": "MIT",
+  "dependencies": {
+    "fs": "^0.0.1-security",
+    "node-dir": "^0.1.17",
+    "node-fetch": "^3.1.0",
+    "turndown": "^7.1.1"
+  },
+  "devDependencies": {
+    "@types/node": "^17.0.5",
+    "tslib": "^2.3.1"
+  }
+}
