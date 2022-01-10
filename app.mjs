@@ -13,6 +13,8 @@ const nodebbHeaders = {
 const turndownService = new TurndownService();
 
 //lookups
+// parsed tetra posts
+const tetraPosts = {}
 // Tetra post id to nodebb post id
 const tetraPid2nodePid = {};
 // Tetra post id to nodebb topic id
@@ -102,17 +104,41 @@ async function createUser(username, email) {
     return resBody.response.uid;
 }
 
-async function parseTetraPost(data) {
+function getParsedTetraPost(tetraPostFileName) {
 
-    let isThreadStart = false;
-    let previous = null;
-    let next = null;
-    // if this post is the beginning of a tetra-thread use the subject for a new nodebb-topic
-    let subject = null;
-    let timestamp = null;
-    let uid = null;
-    let email = null;
-    let username = null;
+    const tetraPid = path.basename(tetraPostFileName)
+
+    let post = tetraPosts[tetraPid]
+
+    if (post) {
+        // post was already parsed
+        return post;
+    }
+
+    console.log(`Parsing ${tetraPid}`);
+    let tetraPostRaw = fs.readFileSync(tetraPostFileName, 'latin1');
+
+    post = parseTetraPost(tetraPostRaw);
+
+    tetraPosts[tetraPid] = post;
+
+    return post;
+
+}
+
+function parseTetraPost(data) {
+
+    let parsed = {
+        isThreadStart: false,
+        previous: null,
+        next: null,
+        // if this post is the beginning of a tetra-thread use the subject for a new nodebb-topic
+        subject: null,
+        timestamp: null,
+        email: null,
+        username: null,
+        content: null,
+    };
 
 
     const kvMatcher = /^(?<key>[A-Z_]+)\>(?<value>.*)/;
@@ -138,19 +164,19 @@ async function parseTetraPost(data) {
         }
         switch (key) {
             case "SUBJECT":
-                subject = value;                
+                parsed.subject = value;                
                 break;
             case "POSTER":
-                username = value;
+                parsed.username = value;
                 break;
             case "EMAIL":
                 // ignore email for now so we are not leaking anything accidentally
                 // email = value
-                email = "";
+                parsed.email = "";
                 break;
             case "DATE":
                 // left-pad to nodebb: format millis since epoche
-                timestamp = value.padEnd(13, '0');
+                parsed.timestamp = value.padEnd(13, '0');
                 break;
             case "IP_ADDRESS":
                 // ignore
@@ -160,11 +186,11 @@ async function parseTetraPost(data) {
                 break;
             case "PREVIOUS":
                 // if there is no previous post it is the start of a topic
-                isThreadStart = !value;
-                previous = value;
+                parsed.isThreadStart = !value;
+                parsed.previous = value.trim();
                 break;
             case "NEXT":
-                next = value.trim().split(" ").filter(s => s.length > 0);
+                parsed.next = value.trim().split(" ").filter(s => s.length > 0);
                 break;
             case "IMAGE":
                 // ignore
@@ -183,26 +209,36 @@ async function parseTetraPost(data) {
     }
 
     // default is new thread
-    let path = null;
-    let responseAction = null;
 
     const contentHtml = data.substring(lineStart);
 
     // Make image urls absolute
     const contentAbs = contentHtml.replaceAll('"/webbbs/media', '"https://www.lepiforum.de/webbbs/media')
 
-    const contentMd = turndownService.turndown(contentAbs);
+    parsed.content = turndownService.turndown(contentAbs);
+    return parsed;
+}
+
+async function migratePostToNodeBB(parsed){
+
+    let path = null;
+    let responseAction = null;
 
     let post = {
-        content: contentMd,
-        _uid: await getOrCreateUserId(username, email),
+        content: parsed.content,
+        _uid: await getOrCreateUserId(parsed.username, parsed.email),
     }
 
-    if (isThreadStart) {
+    if (parsed.isThreadStart) {
 
         path = `${nodebbHost}/api/v3/topics/`
-        post.title = subject;
+        post.title = parsed.subject;
         post.cid = 5; // TODO
+
+        if (post.content.length < 8) {
+            post.content = post.content +"*Platzhalter: Originalpost hatte nur einen zu kurzen Inhalt*"
+        }
+
         responseAction = (tetraPid, resBody) => {
             const tid  = resBody.response.tid;
 
@@ -213,21 +249,21 @@ async function parseTetraPost(data) {
         }
     } else {
         // post to an existing topic
-        const tid = tetraPid2nodeTid[previous];
+        const tid = tetraPid2nodeTid[parsed.previous];
         if (!tid) {
-            throw new Error(`Cannot find topic id for Tetra post ${previous}`)
+            throw new Error(`Cannot find topic id for Tetra post ${parsed.previous}`)
         }
         path = `${nodebbHost}/api/v3/topics/${tid}`;
 
-        const previousNodeBBPid = tetraPid2nodePid[previous];
+        const previousNodeBBPid = tetraPid2nodePid[parsed.previous];
         if (previousNodeBBPid) {
             // This post is a sub thread
             post.toPid = previousNodeBBPid;
         }
 
         // Prepend former title to the post content
-        post.content = `${subject}\n${post.content}`;
-        post.timestamp = timestamp;
+        post.content = `${parsed.subject}\n${post.content}`;
+        post.timestamp = parsed.timestamp;
         responseAction = (tetraPid, resBody) => {
             tetraPid2nodeTid[tetraPid] = tid;
             const pid = resBody.pid;
@@ -242,26 +278,19 @@ async function parseTetraPost(data) {
     return {
         path: path,
         body: post,
-        next: next,
+        next: parsed.next,
         responseAction: responseAction,
     }
-
 }
 
 //let file= '/home/thoni/Documents/projects/lepiforum/994-test-beitrag';
 //const file = "/home/thoni/Documents/projects/lepiforum/forum_2_2013/bbs0/2";
 
-async function migrateTetraPost(file) {
-    const tetraPid = path.basename(file)
-    console.log(`Processing ${tetraPid}`);
-    let data = fs.readFileSync(file, 'latin1');
-    
-    let reqData = await parseTetraPost(data)
+async function migrateTetraPost(tetraPid, parsed) {
 
-    if (!reqData) {
-        return;
-    }
-    // console.log(reqData);
+    console.log(`Migrating tetra post ${tetraPid}`);
+    
+    const reqData = await migratePostToNodeBB(parsed);
 
     const res = await fetch(
         reqData.path,
@@ -273,8 +302,9 @@ async function migrateTetraPost(file) {
     )
 
     if (res.status != 200) {
+        console.log(reqData);
         console.log(res);
-        throw new Error(`Failed to migrate post ${file}`);
+        throw new Error(`Failed to migrate post ${tetraPid}`);
     }
     const resBody = await res.json();
 
@@ -292,9 +322,6 @@ let errors = [];
 dir.files("/home/thoni/Documents/projects/lepiforum/test/", async function(err, files) {
     if (err) throw err;
 
-    const done = [];
-
-
     const findTetraPost = tetraPid => {
         const result = files.filter(f => path.basename(f) == tetraPid);
 
@@ -308,20 +335,24 @@ dir.files("/home/thoni/Documents/projects/lepiforum/test/", async function(err, 
         return result[0];
     }
 
-    const handleTetraPost = async function(f) {
+    const handleTetraPost = async function(f, onlyThreadStart) {
         if (!/^[0-9]+$/.test(path.basename(f))) {
             return;
         }
 
-        if (done.includes(f)) {
+
+        const tetraPid = path.basename(f);
+
+        const parsed = getParsedTetraPost(f);
+
+
+        if (!(parsed.isThreadStart == onlyThreadStart)) {
+            // skip post for now because it is not the beginning of a topic
             return;
         }
 
-
-        const next = await migrateTetraPost(f);
+        const next = await migrateTetraPost(tetraPid, parsed);
         
-        done.push(f);
-
         // handle next post recusively
 
         if (!next || next.length == 0) {
@@ -331,14 +362,19 @@ dir.files("/home/thoni/Documents/projects/lepiforum/test/", async function(err, 
         console.log(next);
 
         for( const pid of next) {
-            await handleTetraPost(findTetraPost(pid));
+            try {
+                await handleTetraPost(findTetraPost(pid), false)
+
+            } catch(err) {
+                errors.push(err);
+            }
         }
                 
     }
     
     for( const f of files) {
-        handleTetraPost(f)
-            .catch(err => errors.push(err))
+        handleTetraPost(f, true)
+            //.catch(err => errors.push(err))
             .finally(() => {
                 errors.forEach(err => console.log(err.message))
 
