@@ -3,7 +3,6 @@ import fs from 'fs';
 import path from 'path';
 import dir from 'node-dir';
 import TurndownService from 'turndown';
-import { create } from 'domain';
 // static
 const nodebbHost = "http://localhost:4567";
 const nodebbHeaders = {
@@ -18,7 +17,11 @@ const turndownService = new TurndownService();
 const tetraPid2nodePid = {};
 // Tetra post id to nodebb topic id
 const tetraPid2nodeTid = {};
-
+// users created in this run (mapping of username to promise with uid)
+const users = {};
+let topicCreatedCount = 0;
+let postCreatedCount = 0;
+let userCreatedCount = 0;
 
 
 // TODO
@@ -39,23 +42,35 @@ async function createUserKeycloak(userRepresentation) {
 }
 
 async function getOrCreateUserId(username, email) {
-    //https://community.nodebb.org/api/user/username/{username}
 
-    const uid = await fetch(
+    // check if user mapping already exists
+    let uid =  users[username];
+    if (uid) {
+        return uid;
+    }
+
+    // Check in nodebb if user exists
+    //https://community.nodebb.org/api/user/username/{username}
+    uid = fetch(
         encodeURI(`${nodebbHost}/api/user/username/${username}?_uid=1`),
         {
             method :  'GET',
             headers: nodebbHeaders
         }
-    ).then( res => {
-        if (res.status == 200) {
-            const resBody = await res.json();
-            return resBody.uid;
+    )
+    .then(res => {
+        if(res.ok) {
+            // user was already created in nodebb
+            return res.json().then(json => { return json.uid});
         }
-        return await createUser(username, email);
+
+        // User needs to be created
+        return createUser(username, email)
     });
 
-    return uid;
+    users[username] = uid;
+
+    return uid
 }
 
 async function createUser(username, email) {
@@ -81,6 +96,8 @@ async function createUser(username, email) {
     if (resBody.status.code != 'ok') {
         throw new Error(`Failed to create User (${username}): ${resBody.status.message}`)
     }
+
+    userCreatedCount++;
 
     return resBody.response.uid;
 }
@@ -171,14 +188,10 @@ async function parseTetraPost(data) {
 
     const contentHtml = data.substring(lineStart);
 
-    console.log(`HTML raw:\n${contentHtml}`)
-
     // Make image urls absolute
     const contentAbs = contentHtml.replaceAll('"/webbbs/media', '"https://www.lepiforum.de/webbbs/media')
 
     const contentMd = turndownService.turndown(contentAbs);
-
-    console.log(`Markdown post:\n${contentMd}`);
 
     let post = {
         content: contentMd,
@@ -195,6 +208,7 @@ async function parseTetraPost(data) {
 
             tetraPid2nodeTid[tetraPid] = tid;
 
+            topicCreatedCount++;
             console.log(`Migrated Tetra post ${tetraPid} as Node topic ${tid}`);
         }
     } else {
@@ -218,6 +232,8 @@ async function parseTetraPost(data) {
             tetraPid2nodeTid[tetraPid] = tid;
             const pid = resBody.pid;
             tetraPid2nodePid[tetraPid] = pid;
+
+            postCreatedCount++;
             console.log(`Migrated Tetra post ${tetraPid} to Node topic ${tid} as post ${pid}`);
         }
     }
@@ -323,7 +339,12 @@ dir.files("/home/thoni/Documents/projects/lepiforum/test/", async function(err, 
     for( const f of files) {
         handleTetraPost(f)
             .catch(err => errors.push(err))
-            .finally(() => errors.forEach(err => console.log(err.message)));
+            .finally(() => {
+                errors.forEach(err => console.log(err.message))
+
+                console.log(`Migrated ${((topicCreatedCount + postCreatedCount)/files.length*100).toFixed(2)}%: Topics: ${topicCreatedCount} | Posts: ${postCreatedCount} | TetraPosts: ${files.length}`);
+                console.log(`Created ${userCreatedCount} Users`);
+            });
     }
 });
 
