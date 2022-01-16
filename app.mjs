@@ -3,6 +3,8 @@ import fs from 'fs';
 import path from 'path';
 import dir from 'node-dir';
 import TurndownService from 'turndown';
+import XRegExp from 'xregexp';
+
 // static
 const nodebbHost = "http://localhost:4567";
 const nodebbHeaders = {
@@ -104,6 +106,53 @@ async function createUser(username, email) {
     return resBody.response.uid;
 }
 
+
+// From nodebb:public/src/modules/slugify.js
+const invalidUnicodeChars = XRegExp('[^\\p{L}\\s\\d\\-_]', 'g');
+const invalidLatinChars = /[^\w\s\d\-_]/g;
+const trimRegex = /^\s+|\s+$/g;
+const collapseWhitespace = /\s+/g;
+const collapseDash = /-+/g;
+const trimTrailingDash = /-$/g;
+const trimLeadingDash = /^-/g;
+const isLatin = /^[\w\d\s.,\-@]+$/;
+
+function slugify(str, preserveCase) {
+    if (!str) {
+        return '';
+    }
+    str = String(str).replace(trimRegex, '');
+    if (isLatin.test(str)) {
+        str = str.replace(invalidLatinChars, '-');
+    } else {
+        str = XRegExp.replace(str, invalidUnicodeChars, '-');
+    }
+    str = !preserveCase ? str.toLocaleLowerCase() : str;
+    str = str.replace(collapseWhitespace, '-');
+    str = str.replace(collapseDash, '-');
+    str = str.replace(trimTrailingDash, '');
+    str = str.replace(trimLeadingDash, '');
+    return str;
+};
+function isUserNameValid(name) {
+    return (name && name !== '' && (/^['" \-+.*[\]0-9\u00BF-\u1FFF\u2C00-\uD7FF\w]+$/.test(name)));
+}
+
+function sanitizeUsername(username) {
+    let userslug = slugify(username)
+    if (isUserNameValid(username) && userslug){
+        return username;
+    }
+    let sani = username.replace(/,/,'');
+    sani = sani.replace(/&amp/,'+');
+    sani = sani.replace(/ï¿½/,'ß');
+    sani = sani.replace(/e/,'ě');
+    sani = XRegExp.replace(sani, invalidUnicodeChars, '-');
+    sani = sani.replace(/[^'" \-+.*[\]0-9\u00BF-\u1FFF\u2C00-\uD7FF\w]/,'')
+    console.log(`Sanitized username: ${username} => ${sani} (${Buffer.from(username).toString('hex')} -> ${Buffer.from(sani).toString('hex')})`);
+    return sani;
+}
+
 function getParsedTetraPost(tetraPostFileName) {
 
     const tetraPid = path.basename(tetraPostFileName)
@@ -167,7 +216,7 @@ function parseTetraPost(data) {
                 parsed.subject = value;                
                 break;
             case "POSTER":
-                parsed.username = value;
+                parsed.username = sanitizeUsername(value);
                 break;
             case "EMAIL":
                 // ignore email for now so we are not leaking anything accidentally
@@ -213,7 +262,7 @@ function parseTetraPost(data) {
     const contentHtml = data.substring(lineStart);
 
     // Make image urls absolute
-    const contentAbs = contentHtml.replaceAll('"/webbbs/media', '"https://www.lepiforum.de/webbbs/media')
+    const contentAbs = contentHtml.replaceAll('"/webbbs/', '"https://www.lepiforum.de/webbbs/')
 
     parsed.content = turndownService.turndown(contentAbs);
     return parsed;
@@ -234,6 +283,7 @@ async function migratePostToNodeBB(parsed){
         path = `${nodebbHost}/api/v3/topics/`
         post.title = parsed.subject;
         post.cid = 5; // TODO
+        post.timestamp = parsed.timestamp;
 
         if (post.content.length < 8) {
             post.content = post.content +"*Platzhalter: Originalpost hatte nur einen zu kurzen Inhalt*"
@@ -265,8 +315,9 @@ async function migratePostToNodeBB(parsed){
         post.content = `${parsed.subject}\n${post.content}`;
         post.timestamp = parsed.timestamp;
         responseAction = (tetraPid, resBody) => {
+            const tid = resBody.response.tid;
             tetraPid2nodeTid[tetraPid] = tid;
-            const pid = resBody.pid;
+            const pid = resBody.response.pid;
             tetraPid2nodePid[tetraPid] = pid;
 
             postCreatedCount++;
@@ -319,7 +370,7 @@ async function migrateTetraPost(tetraPid, parsed) {
 
 let errors = [];
 
-dir.files("/home/thoni/Documents/projects/lepiforum/test/", async function(err, files) {
+dir.files("/home/thoni/Documents/projects/lepiforum/forum_2_2013/", async function(err, files) {
     if (err) throw err;
 
     const findTetraPost = tetraPid => {
@@ -351,7 +402,16 @@ dir.files("/home/thoni/Documents/projects/lepiforum/test/", async function(err, 
             return;
         }
 
-        const next = await migrateTetraPost(tetraPid, parsed);
+        let next;
+
+        try {
+
+            next = await migrateTetraPost(tetraPid, parsed);
+        } catch (err) {
+            var newErr = new Error(`Failed to migrate post ${tetraPid}`);
+            newErr.stack += `\nCaused by: ${err.message}\n${err.stack}`;
+            throw newErr;
+        }
         
         // handle next post recusively
 
@@ -373,13 +433,12 @@ dir.files("/home/thoni/Documents/projects/lepiforum/test/", async function(err, 
     }
     
     for( const f of files) {
-        handleTetraPost(f, true)
+        await handleTetraPost(f, true)
             //.catch(err => errors.push(err))
             .finally(() => {
                 errors.forEach(err => console.log(err.message))
 
-                console.log(`Migrated ${((topicCreatedCount + postCreatedCount)/files.length*100).toFixed(2)}%: Topics: ${topicCreatedCount} | Posts: ${postCreatedCount} | TetraPosts: ${files.length}`);
-                console.log(`Created ${userCreatedCount} Users`);
+                console.log(`Migrated ${((topicCreatedCount + postCreatedCount)/files.length*100).toFixed(2)}%: Topics: ${topicCreatedCount} | Posts: ${postCreatedCount} | TetraPosts: ${files.length} | ${userCreatedCount} Users`);
             });
     }
 });
