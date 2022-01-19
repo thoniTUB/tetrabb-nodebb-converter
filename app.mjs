@@ -328,50 +328,30 @@ async function preparePostForRequest(parsed){
         }
     }
 
-    // The tetra post is longer than than nodebb allows: split it and make more posts
-    if(post.content.length > maxPostLength){
-        const splitedContent = splitContent(post.content);
 
-        post.content = splitedContent[0];
-        for( let extention of splitedContent.slice(1)) {
-            const prevAction = responseAction;
-            responseAction = async function (tetraPid, resBody) {
-                prevAction(tetraPid,resBody);
+    const {split , rest} = splitContent(post.content);
 
-                // TODO use structured clone from node 17
-                const ext = JSON.parse(JSON.stringify(parsed));
-                ext.isThreadStart = false;
-                ext.previous = tetraPid;
-                ext.content = extention;
-                ext.subject = undefined;
+    if (rest) {
+        // The tetra post is longer than than nodebb allows: split it and make more posts
+        // The responseAction is just extended and migrates the rest as an response to the actual post.
+        const prevAction = responseAction;
+        responseAction = async function (tetraPid, resBody) {
+            prevAction(tetraPid,resBody);
 
-                const reqData =  await preparePostForRequest(ext);
-                const res = await fetch(
-                    reqData.path,
-                    {
-                        method: "POST",
-                        headers: nodebbHeaders,
-                        body: JSON.stringify(reqData.body),
-                    }
-                )
-            
-                if (res.status != 200) {
-                    console.log(reqData);
-                    console.log(res);
-                    throw new Error(`Failed to migrate post ${tetraPid}`);
-                }
-                resBody = await res.json();
-            
-                if (resBody.status.code != 'ok') {
-                    throw new Error(resBody.status.message);
-                }
-            
-                // register migrated post
-                reqData.responseAction(tetraPid, resBody);
-            }
+            // TODO use structured clone from node 17
+            const ext = JSON.parse(JSON.stringify(parsed));
+            ext.isThreadStart = false;
+            ext.previous = tetraPid;
+            ext.content = rest;
+            ext.subject = undefined;
+            ext.next = undefined;
+
+            return await migrateTetraPost(tetraPid, ext);
         }
+        
     }
 
+    post.content = split;
 
     return {
         path: path,
@@ -383,30 +363,19 @@ async function preparePostForRequest(parsed){
 
 function splitContent(content) {
     const splits = [];
-    let splitStart = 0;
     const length = content.length;
     let splitEnd = 0;
 
-    console.log(`Content length: ${length}`);
-
-    while(length - splitStart > maxPostLength) {
-        splitEnd = splitStart + content.slice(splitStart, splitStart + maxPostLength).lastIndexOf('\n');
-
-        console.log(`Split ${splitStart}-${splitEnd}`);
-
-        const part = content.slice(splitStart,splitEnd)
-        splits.push(part);
-
-        splitStart = splitEnd;
+    if (length <= maxPostLength) {
+        return {split: content, rest: undefined};
     }
 
-    if (length - splitStart < maxPostLength) {
-        console.log(`Split ${splitStart}-${length}`);
-        splits.push(content.slice(splitStart,length));
-    }
-    
+    splitEnd = content.slice(0, maxPostLength).lastIndexOf('\n');
 
-    return splits;
+    const split = content.slice(0,splitEnd);
+    const rest = content.slice(splitEnd);
+
+    return {split: split, rest: rest};
 }
 
 //let file= '/home/thoni/Documents/projects/lepiforum/994-test-beitrag';
@@ -445,7 +414,7 @@ async function migrateTetraPost(tetraPid, parsed) {
 
 let errors = [];
 
-dir.files("/home/thoni/Documents/projects/lepiforum/test/", async function(err, files) {
+dir.files("/home/thoni/Documents/projects/lepiforum/test2/", async function(err, files) {
     if (err) throw err;
 
     const findTetraPost = tetraPid => {
