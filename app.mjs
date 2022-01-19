@@ -11,6 +11,7 @@ const nodebbHeaders = {
     Authorization : "Bearer b18bcbb2-c30f-432e-9747-a4ce85227808",
     "Content-Type": "application/json"
 };
+const maxPostLength = 32000;
 
 const turndownService = new TurndownService();
 
@@ -268,7 +269,7 @@ function parseTetraPost(data) {
     return parsed;
 }
 
-async function migratePostToNodeBB(parsed){
+async function preparePostForRequest(parsed){
 
     let path = null;
     let responseAction = null;
@@ -291,11 +292,13 @@ async function migratePostToNodeBB(parsed){
 
         responseAction = (tetraPid, resBody) => {
             const tid  = resBody.response.tid;
+            const pid  = resBody.response.mainPid;
 
             tetraPid2nodeTid[tetraPid] = tid;
+            tetraPid2nodePid[tetraPid] = pid;
 
             topicCreatedCount++;
-            console.log(`Migrated Tetra post ${tetraPid} as Node topic ${tid}`);
+            console.log(`Migrated Tetra post ${tetraPid} as Node topic ${tid} with post ${pid}`);
         }
     } else {
         // post to an existing topic
@@ -312,7 +315,7 @@ async function migratePostToNodeBB(parsed){
         }
 
         // Prepend former title to the post content
-        post.content = `${parsed.subject}\n${post.content}`;
+        post.content = `${parsed.subject ? parsed.subject + "\n" : ""}${post.content}`;
         post.timestamp = parsed.timestamp;
         responseAction = (tetraPid, resBody) => {
             const tid = resBody.response.tid;
@@ -325,6 +328,50 @@ async function migratePostToNodeBB(parsed){
         }
     }
 
+    // The tetra post is longer than than nodebb allows: split it and make more posts
+    if(post.content.length > maxPostLength){
+        const splitedContent = splitContent(post.content);
+
+        post.content = splitedContent[0];
+        for( let extention of splitedContent.slice(1)) {
+            const prevAction = responseAction;
+            responseAction = async function (tetraPid, resBody) {
+                prevAction(tetraPid,resBody);
+
+                // TODO use structured clone from node 17
+                const ext = JSON.parse(JSON.stringify(parsed));
+                ext.isThreadStart = false;
+                ext.previous = tetraPid;
+                ext.content = extention;
+                ext.subject = undefined;
+
+                const reqData =  await preparePostForRequest(ext);
+                const res = await fetch(
+                    reqData.path,
+                    {
+                        method: "POST",
+                        headers: nodebbHeaders,
+                        body: JSON.stringify(reqData.body),
+                    }
+                )
+            
+                if (res.status != 200) {
+                    console.log(reqData);
+                    console.log(res);
+                    throw new Error(`Failed to migrate post ${tetraPid}`);
+                }
+                resBody = await res.json();
+            
+                if (resBody.status.code != 'ok') {
+                    throw new Error(resBody.status.message);
+                }
+            
+                // register migrated post
+                reqData.responseAction(tetraPid, resBody);
+            }
+        }
+    }
+
 
     return {
         path: path,
@@ -334,6 +381,34 @@ async function migratePostToNodeBB(parsed){
     }
 }
 
+function splitContent(content) {
+    const splits = [];
+    let splitStart = 0;
+    const length = content.length;
+    let splitEnd = 0;
+
+    console.log(`Content length: ${length}`);
+
+    while(length - splitStart > maxPostLength) {
+        splitEnd = splitStart + content.slice(splitStart, splitStart + maxPostLength).lastIndexOf('\n');
+
+        console.log(`Split ${splitStart}-${splitEnd}`);
+
+        const part = content.slice(splitStart,splitEnd)
+        splits.push(part);
+
+        splitStart = splitEnd;
+    }
+
+    if (length - splitStart < maxPostLength) {
+        console.log(`Split ${splitStart}-${length}`);
+        splits.push(content.slice(splitStart,length));
+    }
+    
+
+    return splits;
+}
+
 //let file= '/home/thoni/Documents/projects/lepiforum/994-test-beitrag';
 //const file = "/home/thoni/Documents/projects/lepiforum/forum_2_2013/bbs0/2";
 
@@ -341,7 +416,7 @@ async function migrateTetraPost(tetraPid, parsed) {
 
     console.log(`Migrating tetra post ${tetraPid}`);
     
-    const reqData = await migratePostToNodeBB(parsed);
+    const reqData = await preparePostForRequest(parsed);
 
     const res = await fetch(
         reqData.path,
@@ -370,7 +445,7 @@ async function migrateTetraPost(tetraPid, parsed) {
 
 let errors = [];
 
-dir.files("/home/thoni/Documents/projects/lepiforum/forum_2_2013/", async function(err, files) {
+dir.files("/home/thoni/Documents/projects/lepiforum/test/", async function(err, files) {
     if (err) throw err;
 
     const findTetraPost = tetraPid => {
