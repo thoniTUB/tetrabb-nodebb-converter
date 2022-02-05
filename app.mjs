@@ -4,11 +4,29 @@ import path from 'path';
 import dir from 'node-dir';
 import TurndownService from 'turndown';
 import XRegExp from 'xregexp';
+import winston from 'winston';
+
+
+const logger = winston.createLogger({
+    level: 'info',
+    format: winston.format.json(),
+    defaultMeta: { service: 'user-service' },
+    transports: [
+      //
+      // - Write all logs with importance level of `error` or less to `error.log`
+      // - Write all logs with importance level of `info` or less to `combined.log`
+      //
+      new winston.transports.Console(),
+      new winston.transports.File({ filename: 'error.log', level: 'error' }),
+      new winston.transports.File({ filename: 'combined.log' }),
+    ],
+  });
 
 // static
 const nodebbHost = "http://localhost:4567";
+const nodeApi = `${nodebbHost}/api/v3`
 const nodebbHeaders = {
-    Authorization : "Bearer b18bcbb2-c30f-432e-9747-a4ce85227808",
+    Authorization : "Bearer c509d974-a30d-45d3-b2b8-e0324fff535a",
     "Content-Type": "application/json"
 };
 const maxPostLength = 32000;
@@ -86,13 +104,10 @@ async function createUser(username, email) {
     };
     
     const response = await fetch(
-            `${nodebbHost}/api/v3/users?_uid=1`,
+            `${nodeApi}/users?_uid=1`,
             {
                 method: 'POST',
-                headers: {
-                    Authorization : "Bearer b18bcbb2-c30f-432e-9747-a4ce85227808",
-                    "Content-Type": "application/json"
-                },
+                headers: nodebbHeaders,
                 body: JSON.stringify(reqBody)
             }
         );
@@ -150,7 +165,7 @@ function sanitizeUsername(username) {
     sani = sani.replace(/e/,'ě');
     sani = XRegExp.replace(sani, invalidUnicodeChars, '-');
     sani = sani.replace(/[^'" \-+.*[\]0-9\u00BF-\u1FFF\u2C00-\uD7FF\w]/,'')
-    console.log(`Sanitized username: ${username} => ${sani} (${Buffer.from(username).toString('hex')} -> ${Buffer.from(sani).toString('hex')})`);
+    logger.debug(`Sanitized username: ${username} => ${sani} (${Buffer.from(username).toString('hex')} -> ${Buffer.from(sani).toString('hex')})`);
     return sani;
 }
 
@@ -165,7 +180,7 @@ function getParsedTetraPost(tetraPostFileName) {
         return post;
     }
 
-    console.log(`Parsing ${tetraPid}`);
+    logger.debug(`Parsing ${tetraPid}`);
     let tetraPostRaw = fs.readFileSync(tetraPostFileName, 'latin1');
 
     post = parseTetraPost(tetraPostRaw);
@@ -197,7 +212,7 @@ function parseTetraPost(data) {
     let lineEnd = data.indexOf("\n");
     while(true) {
         let line = data.substring(lineStart, lineEnd);
-        // console.log(line);
+        logger.debug(line);
         let match = kvMatcher.exec(line);
 
         if (!match) {
@@ -206,8 +221,7 @@ function parseTetraPost(data) {
 
         let key = match.groups.key;
         let value = match.groups.value;
-        // console.log(`Extracted Key: ${key}\tValue: ${value}`);
-        // console.log('------');
+        logger.debug(`Extracted Key: ${key}\tValue: ${value}`);
 
         if (!key) {
             break;
@@ -281,7 +295,7 @@ async function preparePostForRequest(parsed){
 
     if (parsed.isThreadStart) {
 
-        path = `${nodebbHost}/api/v3/topics/`
+        path = `${nodeApi}/topics/`
         post.title = parsed.subject;
         post.cid = 5; // TODO
         post.timestamp = parsed.timestamp;
@@ -298,7 +312,7 @@ async function preparePostForRequest(parsed){
             tetraPid2nodePid[tetraPid] = pid;
 
             topicCreatedCount++;
-            console.log(`Migrated Tetra post ${tetraPid} as Node topic ${tid} with post ${pid}`);
+            logger.debug(`Migrated Tetra post ${tetraPid} as Node topic ${tid} with post ${pid}`);
         }
     } else {
         // post to an existing topic
@@ -306,7 +320,7 @@ async function preparePostForRequest(parsed){
         if (!tid) {
             throw new Error(`Cannot find topic id for Tetra post ${parsed.previous}`)
         }
-        path = `${nodebbHost}/api/v3/topics/${tid}`;
+        path = `${nodeApi}/topics/${tid}`;
 
         const previousNodeBBPid = tetraPid2nodePid[parsed.previous];
         if (previousNodeBBPid) {
@@ -324,7 +338,7 @@ async function preparePostForRequest(parsed){
             tetraPid2nodePid[tetraPid] = pid;
 
             postCreatedCount++;
-            console.log(`Migrated Tetra post ${tetraPid} to Node topic ${tid} as post ${pid}`);
+            logger.debug(`Migrated Tetra post ${tetraPid} to Node topic ${tid} as post ${pid}`);
         }
     }
 
@@ -383,7 +397,7 @@ function splitContent(content) {
 
 async function migrateTetraPost(tetraPid, parsed) {
 
-    console.log(`Migrating tetra post ${tetraPid}`);
+    logger.debug(`Migrating tetra post ${tetraPid}`);
     
     const reqData = await preparePostForRequest(parsed);
 
@@ -397,9 +411,8 @@ async function migrateTetraPost(tetraPid, parsed) {
     )
 
     if (res.status != 200) {
-        console.log(reqData);
-        console.log(res);
-        throw new Error(`Failed to migrate post ${tetraPid}`);
+        logger.error({"Request": reqData, "Response": res});
+        throw new Error(`Failed to migrate post ${tetraPid}. Please also check the server logs. Request: ${JSON.stringify(reqData)}, Response: ${JSON.stringify(res)}`);
     }
     const resBody = await res.json();
 
@@ -414,7 +427,58 @@ async function migrateTetraPost(tetraPid, parsed) {
 
 let errors = [];
 
-dir.files("/home/thoni/Documents/projects/lepiforum/test2/", async function(err, files) {
+async function alterAdminSettings(settings) {
+
+    for (const [setting, value] of Object.entries(settings)) {
+        const res = await fetch(
+            `${nodeApi}/admin/settings/${setting}?_uid=1`,
+            {
+                method: "PUT",
+                headers: nodebbHeaders,
+                body: JSON.stringify({value: value}),
+            }
+        )
+
+        if(res.status != 200) {
+            logger.error(`Unable to set admin setting: ${setting}:${value}`);
+            throw new Error(`Unable to set admin setting: ${setting}:${value}. Please look into the server logs.`)
+        }
+    }
+
+}
+
+logger.info(`Preparing admin settings to allow imidiate posts.`)
+await alterAdminSettings({
+    postDelay: 0,
+    newbiePostDelayThreshold: 0,
+    newbiePostDelay: 0,
+    initialPostDelay: 0,
+    newbiePostEditDuration: 0
+});
+
+const mapping_file = "migration_map.json"
+logger.info(`Checking for previous post mappings in file: ${mapping_file}`)
+
+if(fs.existsSync(mapping_file)) {
+    fs.readFile(mapping_file, 'utf-8', (err, data) => {
+        if (err) {
+            throw err;
+        }
+    
+        // parse JSON object
+        ({tetraPid2nodePid, tetraPid2nodeTid} = JSON.parse(data.toString()));
+
+
+        logger.info(`Loaded mappings for ${tetraPid2nodePid.length} posts`)
+    
+    });
+
+}
+
+
+
+
+dir.files("/home/thoni/Documents/projects/lepiforum/test/", async function(err, files) {
     if (err) throw err;
 
     const findTetraPost = tetraPid => {
@@ -453,7 +517,7 @@ dir.files("/home/thoni/Documents/projects/lepiforum/test2/", async function(err,
             next = await migrateTetraPost(tetraPid, parsed);
         } catch (err) {
             var newErr = new Error(`Failed to migrate post ${tetraPid}`);
-            newErr.stack += `\nCaused by: ${err.message}\n${err.stack}`;
+            newErr.stack += `\nCaused by: ${err.stack}`;
             throw newErr;
         }
         
@@ -463,7 +527,7 @@ dir.files("/home/thoni/Documents/projects/lepiforum/test2/", async function(err,
             return;
         }
 
-        console.log(next);
+        //console.log(next);
 
         for( const pid of next) {
             try {
@@ -480,10 +544,28 @@ dir.files("/home/thoni/Documents/projects/lepiforum/test2/", async function(err,
         await handleTetraPost(f, true)
             //.catch(err => errors.push(err))
             .finally(() => {
-                errors.forEach(err => console.log(err.message))
 
-                console.log(`Migrated ${((topicCreatedCount + postCreatedCount)/files.length*100).toFixed(2)}%: Topics: ${topicCreatedCount} | Posts: ${postCreatedCount} | TetraPosts: ${files.length} | ${userCreatedCount} Users`);
+                logger.info(`Migrated ${((topicCreatedCount + postCreatedCount)/files.length*100).toFixed(2)}%: Topics: ${topicCreatedCount} | Posts: ${postCreatedCount} | TetraPosts: ${files.length} | ${userCreatedCount} Users`);
             });
     }
+    errors.forEach(err => logger.error(err.message))
+
+    try {
+        fs.writeFileSync(mapping_file, JSON.stringify({tetraPid2nodePid, tetraPid2nodeTid}));
+        logger.info(`Saved post mapping to ${mapping_file}`);
+    } catch (error) {
+        logger.error(error);
+        throw error;
+    }
+
+    logger.info(`Resetting admin settings to to normal operation.`)
+    await alterAdminSettings({
+        postDelay: 10,
+        newbiePostDelayThreshold: 3,
+        newbiePostDelay: 120,
+        initialPostDelay: 10,
+        newbiePostEditDuration: 3600
+    });
 });
+
 
