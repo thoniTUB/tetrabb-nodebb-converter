@@ -30,13 +30,22 @@ nconf
                 demand: true,
                 default: '.',
                 parseValues: true
+            },
+            "pid-map": {
+                alias: 'm',
+                describe: 'File to load/save the mapping of migrated post ids (Tetra->NodeBB).',
+                demand: true,
+                default: "migration_map.json",
+                parseValues: true
             }
         }
     )
     .required(['token', 'nodebb-url', 'tetra-folder']);
-const token = nconf.get('token')
-const nodebbUrl = nconf.get('nodebb-url')
-const tetraFolder = nconf.get('tetra-folder')
+
+const token = nconf.get('token');
+const nodebbUrl = nconf.get('nodebb-url');
+const tetraFolder = nconf.get('tetra-folder');
+const mapping_file = nconf.get('pid-map');
 
 // configure logging
 const myFormat = winston.format.printf(({ level, message, timestamp }) => {
@@ -485,7 +494,6 @@ await alterAdminSettings({
     newbiePostEditDuration: 0
 });
 
-const mapping_file = "migration_map.json"
 logger.info(`Checking for previous post mappings in file: ${mapping_file}`)
 
 if (fs.existsSync(mapping_file)) {
