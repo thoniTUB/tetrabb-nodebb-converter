@@ -9,14 +9,14 @@ import winston from 'winston';
 
 const logger = winston.createLogger({
     level: 'info',
-    format: winston.format.json(),
+    format: winston.format.cli(),
     defaultMeta: { service: 'user-service' },
     transports: [
       //
       // - Write all logs with importance level of `error` or less to `error.log`
       // - Write all logs with importance level of `info` or less to `combined.log`
       //
-      new winston.transports.Console(),
+      new winston.transports.Console({level: 'info'}),
       new winston.transports.File({ filename: 'error.log', level: 'error' }),
       new winston.transports.File({ filename: 'combined.log' }),
     ],
@@ -33,18 +33,21 @@ const maxPostLength = 32000;
 
 const turndownService = new TurndownService();
 
-//lookups
+// Lookups
 // parsed tetra posts
 const tetraPosts = {}
 // Tetra post id to nodebb post id
-const tetraPid2nodePid = {};
+let tetraPid2nodePid = {};
 // Tetra post id to nodebb topic id
-const tetraPid2nodeTid = {};
+let tetraPid2nodeTid = {};
 // users created in this run (mapping of username to promise with uid)
 const users = {};
+
+// Statistics
 let topicCreatedCount = 0;
 let postCreatedCount = 0;
 let userCreatedCount = 0;
+let postSkippedCount = 0;
 
 
 // TODO
@@ -460,29 +463,33 @@ const mapping_file = "migration_map.json"
 logger.info(`Checking for previous post mappings in file: ${mapping_file}`)
 
 if(fs.existsSync(mapping_file)) {
-    fs.readFile(mapping_file, 'utf-8', (err, data) => {
-        if (err) {
-            throw err;
-        }
+    try{
+        const data = fs.readFileSync(mapping_file, {encoding:'utf8', flag:'r'});
     
         // parse JSON object
         ({tetraPid2nodePid, tetraPid2nodeTid} = JSON.parse(data.toString()));
 
 
         logger.info(`Loaded mappings for ${tetraPid2nodePid.length} posts`)
-    
-    });
+    } catch (err) {
+        throw err;
+    }
 
 }
 
 
 
 
-dir.files("/home/thoni/Documents/projects/lepiforum/test/", async function(err, files) {
+
+
+dir.files("/home/thoni/Documents/projects/lepiforum/forum_2_2013/", async function(err, files) {
     if (err) throw err;
 
+    // filter out all files whose file name is not a plain number
+    let postFiles = files.filter(f => /^[0-9]+$/.test(path.basename(f)))
+
     const findTetraPost = tetraPid => {
-        const result = files.filter(f => path.basename(f) == tetraPid);
+        const result = postFiles.filter(f => path.basename(f) == tetraPid);
 
         if (result.length == 0) {
             throw new Error(`Unable to find tetra post ${tetraPid}`);
@@ -494,19 +501,28 @@ dir.files("/home/thoni/Documents/projects/lepiforum/test/", async function(err, 
         return result[0];
     }
 
-    const handleTetraPost = async function(f, onlyThreadStart) {
-        if (!/^[0-9]+$/.test(path.basename(f))) {
-            return;
-        }
+    const digits = postFiles.length.toString().length;
+    const padFileRelNumber = number => {
+        return number.toString().padStart(digits)
+    }
 
+
+    const handleTetraPost = async function(f) {
 
         const tetraPid = path.basename(f);
+
+        // Check first if post was already migrated
+        if(tetraPid in tetraPid2nodePid) {
+            postSkippedCount++;
+            logger.debug(`Skipping Tetra post ${tetraPid}. Was already migrated`)
+            return;
+        }
 
         const parsed = getParsedTetraPost(f);
 
 
-        if (!(parsed.isThreadStart == onlyThreadStart)) {
-            // skip post for now because it is not the beginning of a topic
+        if (!(parsed.isThreadStart || parsed.previous in tetraPid2nodePid) ) {
+            // skip post for now because it is not the beginning of a topic or it's precessor was not migrated yet
             return;
         }
 
@@ -527,11 +543,9 @@ dir.files("/home/thoni/Documents/projects/lepiforum/test/", async function(err, 
             return;
         }
 
-        //console.log(next);
-
         for( const pid of next) {
             try {
-                await handleTetraPost(findTetraPost(pid), false)
+                await handleTetraPost(findTetraPost(pid))
 
             } catch(err) {
                 errors.push(err);
@@ -540,12 +554,12 @@ dir.files("/home/thoni/Documents/projects/lepiforum/test/", async function(err, 
                 
     }
     
-    for( const f of files) {
+    for( const f of postFiles) {
         await handleTetraPost(f, true)
             //.catch(err => errors.push(err))
             .finally(() => {
 
-                logger.info(`Migrated ${((topicCreatedCount + postCreatedCount)/files.length*100).toFixed(2)}%: Topics: ${topicCreatedCount} | Posts: ${postCreatedCount} | TetraPosts: ${files.length} | ${userCreatedCount} Users`);
+                logger.info(`Migrated ${((topicCreatedCount + postCreatedCount + postSkippedCount)/(postFiles.length)*100).toFixed(2).padStart(6)}%: NodeBBTopics: ${padFileRelNumber(topicCreatedCount)} | NodeBBPosts: ${padFileRelNumber(postCreatedCount)} | Skipped: ${padFileRelNumber(postSkippedCount)} | TetraPosts: ${postFiles.length} | ${userCreatedCount} Users`);
             });
     }
     errors.forEach(err => logger.error(err.message))
