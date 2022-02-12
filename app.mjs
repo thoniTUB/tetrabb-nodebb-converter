@@ -24,6 +24,13 @@ nconf
                 default: 'http://localhost:4567',
                 parseValues: true
             },
+            "cat-id": {
+                alias: 'c',
+                describe: 'The category id of the NodeBB category',
+                demand: true,
+                parseValues: true
+            },
+            
             "tetra-folder": {
                 alias: 'f',
                 describe: 'The folder under which to search for tetra forum posts',
@@ -44,6 +51,7 @@ nconf
 
 const token = nconf.get('token');
 const nodebbUrl = nconf.get('nodebb-url');
+const catId = nconf(`cat-id`);
 const tetraFolder = nconf.get('tetra-folder');
 const mapping_file = nconf.get('pid-map');
 
@@ -335,7 +343,7 @@ async function preparePostForRequest(parsed) {
 
         path = `${nodeApi}/topics/`
         post.title = parsed.subject;
-        post.cid = 5; // TODO
+        post.cid = catId;
         post.timestamp = parsed.timestamp;
 
         if (post.content.length < 8) {
