@@ -6,10 +6,20 @@ import TurndownService from 'turndown';
 import XRegExp from 'xregexp';
 import winston from 'winston';
 
+// script config
+
+
+// configure logging
+const myFormat = winston.format.printf(({ level, message, timestamp }) => {
+    return `${timestamp} ${level}: ${message}`;
+  });
 
 const logger = winston.createLogger({
     level: 'info',
-    format: winston.format.cli(),
+    format: winston.format.combine(
+        winston.format.timestamp(),
+        myFormat
+    ),
     defaultMeta: { service: 'user-service' },
     transports: [
       //
@@ -164,8 +174,6 @@ function sanitizeUsername(username) {
     }
     let sani = username.replace(/,/,'');
     sani = sani.replace(/&amp/,'+');
-    sani = sani.replace(/ï¿½/,'ß');
-    sani = sani.replace(/e/,'ě');
     sani = XRegExp.replace(sani, invalidUnicodeChars, '-');
     sani = sani.replace(/[^'" \-+.*[\]0-9\u00BF-\u1FFF\u2C00-\uD7FF\w]/,'')
     logger.debug(`Sanitized username: ${username} => ${sani} (${Buffer.from(username).toString('hex')} -> ${Buffer.from(sani).toString('hex')})`);
@@ -212,10 +220,18 @@ function parseTetraPost(data) {
     const kvMatcher = /^(?<key>[A-Z_]+)\>(?<value>.*)/;
 
     let lineStart = 0;
-    let lineEnd = data.indexOf("\n");
+    let lineEnd = -1;
     while(true) {
+        lineStart = lineEnd+1;
+        lineEnd = data.indexOf("\n", lineStart);
         let line = data.substring(lineStart, lineEnd);
         logger.debug(line);
+
+        if (line.startsWith('<!--')) {
+            // some posts contain comments that are not relevant
+            continue;
+        }
+
         let match = kvMatcher.exec(line);
 
         if (!match) {
@@ -226,7 +242,7 @@ function parseTetraPost(data) {
         let value = match.groups.value;
         logger.debug(`Extracted Key: ${key}\tValue: ${value}`);
 
-        if (!key) {
+        if (!key || key.startsWith('<!--')) {
             break;
         }
         switch (key) {
@@ -271,8 +287,6 @@ function parseTetraPost(data) {
             default:
                 break;
         }
-        lineStart = lineEnd+1;
-        lineEnd = data.indexOf("\n", lineStart);
     }
 
     // default is new thread
@@ -297,6 +311,7 @@ async function preparePostForRequest(parsed){
     }
 
     if (parsed.isThreadStart) {
+        // create a new topic
 
         path = `${nodeApi}/topics/`
         post.title = parsed.subject;
@@ -477,11 +492,6 @@ if(fs.existsSync(mapping_file)) {
 
 }
 
-
-
-
-
-
 dir.files("/home/thoni/Documents/projects/lepiforum/forum_2_2013/", async function(err, files) {
     if (err) throw err;
 
@@ -554,6 +564,7 @@ dir.files("/home/thoni/Documents/projects/lepiforum/forum_2_2013/", async functi
                 
     }
     
+    // main loop
     for( const f of postFiles) {
         await handleTetraPost(f, true)
             //.catch(err => errors.push(err))
