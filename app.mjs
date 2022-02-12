@@ -88,22 +88,6 @@ let postCreatedCount = 0;
 let userCreatedCount = 0;
 let postSkippedCount = 0;
 
-
-// TODO
-async function createUserKeycloak(userRepresentation) {
-    // https://www.keycloak.org/docs-api/15.0/rest-api/index.html#_users_resource
-    const response = await fetch(
-        "http://keycloak/auth/users",
-        {
-            method: "POST",
-            headers: {
-                "Content-Type": "application/json"
-            },
-            body: JSON.stringify(userRepresentation)
-        }
-    )
-}
-
 async function getOrCreateUserId(username, email) {
 
     // check if user mapping already exists
