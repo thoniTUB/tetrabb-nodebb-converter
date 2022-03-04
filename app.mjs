@@ -41,8 +41,6 @@ nconf
             "pid-map": {
                 alias: 'm',
                 describe: 'File to load/save the mapping of migrated post ids (Tetra->NodeBB).',
-                demand: true,
-                default: "migration_map.json",
                 parseValues: true
             }
         }
@@ -51,9 +49,9 @@ nconf
 
 const token = nconf.get('token');
 const nodebbUrl = nconf.get('nodebb-url');
-const catId = nconf(`cat-id`);
+const catId = nconf.get('cat-id');
 const tetraFolder = nconf.get('tetra-folder');
-const mapping_file = nconf.get('pid-map');
+const mapping_file = nconf.get('pid-map') ? nconf.get('pid-map') : path.join(tetraFolder, "migration_map.json") ;
 
 // configure logging
 const myFormat = winston.format.printf(({ level, message, timestamp }) => {
@@ -88,6 +86,7 @@ const nodebbHeaders = {
 const maxPostLength = 32000;
 
 const turndownService = new TurndownService();
+let alreadyMigrated = 0; // quasi static
 
 // Lookups
 // parsed tetra posts
@@ -139,13 +138,14 @@ async function getOrCreateUserId(username, email) {
 
 async function createUser(username, email) {
     const reqBody = {
+        "_uid": 1,
         "username": username,
-        "email": email
+        "email": email,
 
     };
 
     const response = await fetch(
-        `${nodeApi}/users?_uid=1`,
+        `${nodeApi}/users`,
         {
             method: 'POST',
             headers: nodebbHeaders,
@@ -242,10 +242,12 @@ function parseTetraPost(data) {
         email: null,
         username: null,
         content: null,
+        tags:[],
     };
 
 
     const kvMatcher = /^(?<key>[A-Z_]+)\>(?<value>.*)/;
+    const tagMatcher = /^<!--(?<tag>.*)-->$/;
 
     let lineStart = 0;
     let lineEnd = -1;
@@ -255,22 +257,24 @@ function parseTetraPost(data) {
         let line = data.substring(lineStart, lineEnd);
         logger.debug(line);
 
-        if (line.startsWith('<!--')) {
-            // some posts contain comments that are not relevant
-            continue;
-        }
+
 
         let match = kvMatcher.exec(line);
 
         if (!match) {
-            break;
+            const tagMatch = tagMatcher.exec(line)
+            if (!tagMatch) {
+                break;
+            }
+            parsed.tags.push(tagMatch.groups.tag);
+            continue;
         }
 
         let key = match.groups.key;
         let value = match.groups.value;
         logger.debug(`Extracted Key: ${key}\tValue: ${value}`);
 
-        if (!key || key.startsWith('<!--')) {
+        if (!key) {
             break;
         }
         switch (key) {
@@ -408,7 +412,26 @@ async function preparePostForRequest(parsed) {
 
             return await migrateTetraPost(tetraPid, ext);
         }
+    }
 
+    if (parsed.tags.length > 0) {
+        const prevAction = responseAction;
+        responseAction = async function (tetraPid, resBody) {
+            prevAction(tetraPid, resBody);
+
+
+            const tid = resBody.response.tid;
+
+            await fetch(`${nodeApi}/topics/${tid}/tags`,
+            {
+                method: "PUT",
+                headers: nodebbHeaders,
+                body: JSON.stringify({
+                    "_uid": 1,
+                    tags: parsed.tags
+                }),
+            })
+        }
     }
 
     post.content = split;
@@ -477,11 +500,14 @@ async function alterAdminSettings(settings) {
 
     for (const [setting, value] of Object.entries(settings)) {
         const res = await fetch(
-            `${nodeApi}/admin/settings/${setting}?_uid=1`,
+            `${nodeApi}/admin/settings/${setting}`,
             {
                 method: "PUT",
                 headers: nodebbHeaders,
-                body: JSON.stringify({ value: value }),
+                body: JSON.stringify({ 
+                    "_uid": 1,
+                    value: value,
+                }),
             }
         )
 
@@ -512,7 +538,8 @@ if (fs.existsSync(mapping_file)) {
         ({ tetraPid2nodePid, tetraPid2nodeTid } = JSON.parse(data.toString()));
 
 
-        logger.info(`Loaded mappings for ${tetraPid2nodePid.length} posts`)
+        alreadyMigrated = tetraPid2nodePid.length;
+        logger.info(`Loaded mappings for ${alreadyMigrated} posts`)
     } catch (err) {
         throw err;
     }
@@ -597,7 +624,7 @@ dir.files(tetraFolder, async function (err, files) {
             //.catch(err => errors.push(err))
             .finally(() => {
 
-                logger.info(`Migrated ${((topicCreatedCount + postCreatedCount + postSkippedCount) / (postFiles.length) * 100).toFixed(2).padStart(6)}%: NodeBBTopics: ${padFileRelNumber(topicCreatedCount)} | NodeBBPosts: ${padFileRelNumber(postCreatedCount)} | Skipped: ${padFileRelNumber(postSkippedCount)} | TetraPosts: ${postFiles.length} | ${userCreatedCount} Users`);
+                logger.info(`Migrated ${((topicCreatedCount + postCreatedCount + alreadyMigrated) / (postFiles.length) * 100).toFixed(2).padStart(6)}%: NodeBBTopics: ${padFileRelNumber(topicCreatedCount)} | NodeBBPosts: ${padFileRelNumber(postCreatedCount)} | TetraPosts: ${postFiles.length} | ${userCreatedCount} Users`);
             });
     }
     errors.forEach(err => logger.error(err.message))
