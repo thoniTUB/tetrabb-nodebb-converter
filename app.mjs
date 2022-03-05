@@ -1,7 +1,7 @@
 "use strict";
 
 import fetch from 'node-fetch';
-import fs from 'fs';
+import fs from 'fs/promises';
 import path from 'path';
 import dir from 'node-dir';
 import TurndownService from 'turndown';
@@ -91,8 +91,6 @@ const turndownService = new TurndownService();
 let alreadyMigrated = 0; // quasi static
 
 // Lookups
-// parsed tetra posts
-const tetraPosts = {}
 // Tetra post id to nodebb post id
 let tetraPid2nodePid = {};
 // Tetra post id to nodebb topic id
@@ -209,25 +207,17 @@ function sanitizeUsername(username) {
 	return sani;
 }
 
-async function getParsedTetraPost(tetraPostFileName) {
+async function parseTetraPostFile(tetraPostFileName) {
 
 	const tetraPid = path.basename(tetraPostFileName)
 
-	let post = tetraPosts[tetraPid]
-
-	if (post) {
-		// post was already parsed
-		return post;
-	}
-
+	return fs.readFile(tetraPostFileName, 'latin1')
+		.then(
+			tetraPostRaw => {
 	logger.debug(`Parsing ${tetraPid}`);
-	let tetraPostRaw = fs.readFile(tetraPostFileName, 'latin1');
-
-	post = parseTetraPost(tetraPostRaw);
-
-	tetraPosts[tetraPid] = post;
-
-	return post;
+				return parseTetraPost(tetraPostRaw);
+			}
+		);
 
 }
 
@@ -465,7 +455,7 @@ function splitContent(content) {
 //let file= '/home/thoni/Documents/projects/lepiforum/994-test-beitrag';
 //const file = "/home/thoni/Documents/projects/lepiforum/forum_2_2013/bbs0/2";
 
-async function migrateTetraPost(tetraPid, parsed) {
+async function migrateTetraPost(tetraPid, parsed, allParsed) {
 
 	logger.debug(`Migrating tetra post ${tetraPid}`);
 
@@ -491,8 +481,15 @@ async function migrateTetraPost(tetraPid, parsed) {
 	}
 
 	// register migrated post
-	reqData.responseAction(tetraPid, resBody);
-	return reqData.next;
+	await reqData.responseAction(tetraPid, resBody);
+
+	for (const nextPid of reqData.next) {
+		if (!(nextPid in allParsed)) {
+			continue;
+		}
+		const nextPost = await allParsed[nextPid];
+		await migrateTetraPost(nextPid, nextPost, allParsed);
+	}
 }
 
 let errors = [];
@@ -520,7 +517,7 @@ async function alterAdminSettings(settings) {
 
 }
 
-logger.info(`Preparing admin settings to allow imidiate posts.`)
+logger.info(`Preparing admin settings to allow immediate posts.`)
 await alterAdminSettings({
 	postDelay: 0,
 	newbiePostDelayThreshold: 0,
@@ -531,21 +528,21 @@ await alterAdminSettings({
 
 logger.info(`Checking for previous post mappings in file: ${mapping_file}`)
 
-if (fs.existsSync(mapping_file)) {
-	try {
-		const data = fs.readFileSync(mapping_file, { encoding: 'utf8', flag: 'r' });
+await fs.readFile(mapping_file, { encoding: 'utf8', flag: 'r' })
+.then(data => {
+	if(!data) {
+		return;
+	}
 
 		// parse JSON object
 		({ tetraPid2nodePid, tetraPid2nodeTid } = JSON.parse(data.toString()));
 
-
-		alreadyMigrated = tetraPid2nodePid.length;
+	alreadyMigrated = Object.keys(tetraPid2nodePid).length;
 		logger.info(`Loaded mappings for ${alreadyMigrated} posts`)
-	} catch (err) {
-		throw err;
-	}
-
-}
+})
+.catch(err =>{
+	logger.info(`No mapping found. Asume no post was migrated before`);
+});
 
 dir.files(tetraFolder, async function (err, files) {
 	if (err) throw err;
@@ -571,8 +568,7 @@ dir.files(tetraFolder, async function (err, files) {
 		return number.toString().padStart(digits)
 	}
 
-
-	const handleTetraPost = async function (f) {
+	const isMigrated = (f) => {
 
 		const tetraPid = path.basename(f);
 
@@ -580,72 +576,75 @@ dir.files(tetraFolder, async function (err, files) {
 		if (tetraPid in tetraPid2nodePid) {
 			postSkippedCount++;
 			logger.debug(`Skipping Tetra post ${tetraPid}. Was already migrated`)
-			return;
+			return true;
+		}
+		return false;
+
 		}
 
-		const parsed = getParsedTetraPost(f);
-
-
-		if (!(parsed.isThreadStart || parsed.previous in tetraPid2nodePid)) {
-			// skip post for now because it is not the beginning of a topic or it's precessor was not migrated yet
-			return;
-		}
-
-		let next;
-
-		try {
-
-			next = await migrateTetraPost(tetraPid, parsed);
-		} catch (err) {
-			var newErr = new Error(`Failed to migrate post ${tetraPid}`);
-			newErr.stack += `\nCaused by: ${err.stack}`;
-			throw newErr;
-		}
-
-		// handle next post recusively
-
-		if (!next || next.length == 0) {
-			return;
-		}
-
-		for (const pid of next) {
-			try {
-				await handleTetraPost(findTetraPost(pid))
-
-			} catch (err) {
-				errors.push(err);
-			}
-		}
-
-	}
+	let parsedTetra = {};
 
 	// main loop
 	for (const f of postFiles) {
-		await handleTetraPost(f, true)
-			//.catch(err => errors.push(err))
-			.finally(() => {
+		if(isMigrated(f)) {
+			continue;
+		}
 
-				logger.info(`Migrated ${((topicCreatedCount + postCreatedCount + alreadyMigrated) / (postFiles.length) * 100).toFixed(2).padStart(6)}%: NodeBBTopics: ${padFileRelNumber(topicCreatedCount)} | NodeBBPosts: ${padFileRelNumber(postCreatedCount)} | TetraPosts: ${postFiles.length} | ${userCreatedCount} Users`);
-			});
+		const tetraPid = path.basename(f);
+
+
+		parsedTetra[tetraPid] = parseTetraPostFile(f);
+		}
+
+	const migrations = [];
+
+	for (const [tetraPid, parsed] of Object.entries(parsedTetra)) {
+		migrations.push(parsed.then( parsedPost => {
+			if (!(parsedPost.isThreadStart || parsedPost.previous in tetraPid2nodePid)) {
+				// skip post for now because it is not the beginning of a topic or it's precessor was not migrated yet
+				throw new Error(`Cannot be migrated yet`);
+			}
+			return parsedPost;
+		})
+		.then(parsedPost => migrateTetraPost(tetraPid, parsedPost, parsedTetra))
+		.then(finished => logger.info(`Migrated ${((topicCreatedCount + postCreatedCount + alreadyMigrated) / (postFiles.length) * 100).toFixed(2).padStart(6)}%: NodeBBTopics: ${padFileRelNumber(topicCreatedCount)} | NodeBBPosts: ${padFileRelNumber(postCreatedCount)} | TetraPosts: ${postFiles.length} | ${userCreatedCount} Users`))
+		.catch(err => {
+			if (err.message == `Cannot be migrated yet`) {
+				return
+		}
+			throw err;
+		})
+		)
 	}
+
+	await Promise.all(migrations);
+
+	// Wait until all posts resolve
+	await Promise.all(Object.values(tetraPid2nodePid));
+				logger.info(`Migrated ${((topicCreatedCount + postCreatedCount + alreadyMigrated) / (postFiles.length) * 100).toFixed(2).padStart(6)}%: NodeBBTopics: ${padFileRelNumber(topicCreatedCount)} | NodeBBPosts: ${padFileRelNumber(postCreatedCount)} | TetraPosts: ${postFiles.length} | ${userCreatedCount} Users`);
 	errors.forEach(err => logger.error(err.message))
 
-	try {
-		fs.writeFileSync(mapping_file, JSON.stringify({ tetraPid2nodePid, tetraPid2nodeTid }));
+	await Promise.all([
+		fs.writeFile(mapping_file, JSON.stringify({ tetraPid2nodePid, tetraPid2nodeTid }))
+		.then(_ => {
 		logger.info(`Saved post mapping to ${mapping_file}`);
-	} catch (error) {
+		})
+		.catch (error => {
 		logger.error(error);
 		throw error;
-	}
+		}),
 
-	logger.info(`Resetting admin settings to to normal operation.`)
-	await alterAdminSettings({
+		alterAdminSettings({
 		postDelay: 10,
 		newbiePostDelayThreshold: 3,
 		newbiePostDelay: 120,
 		initialPostDelay: 10,
 		newbiePostEditDuration: 3600
-	});
+		}).then( _ => {
+
+		logger.info(`Resetting admin settings to to normal operation.`)
+		})
+	]);
 });
 
 
