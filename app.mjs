@@ -207,7 +207,7 @@ function sanitizeUsername(username) {
 	return sani;
 }
 
-async function parseTetraPostFile(tetraPostFileName) {
+function parseTetraPostFile(tetraPostFileName) {
 
 	const tetraPid = path.basename(tetraPostFileName)
 
@@ -550,18 +550,7 @@ dir.files(tetraFolder, async function (err, files) {
 	// filter out all files whose file name is not a plain number
 	let postFiles = files.filter(f => /^[0-9]+$/.test(path.basename(f)))
 
-	const findTetraPost = tetraPid => {
-		const result = postFiles.filter(f => path.basename(f) == tetraPid);
-
-		if (result.length == 0) {
-			throw new Error(`Unable to find tetra post ${tetraPid}`);
-		}
-		else if (result.length > 1) {
-			throw new Error(`Tetra post id did not led to a distinct post. Found: ${result.toString()}`);
-		}
-
-		return result[0];
-	}
+	logger.info(`Found ${postFiles.length} Tetra posts`)
 
 	const digits = postFiles.length.toString().length;
 	const padFileRelNumber = number => {
@@ -584,7 +573,6 @@ dir.files(tetraFolder, async function (err, files) {
 
 	let parsedTetra = {};
 
-	// main loop
 	for (const f of postFiles) {
 		if(isMigrated(f)) {
 			continue;
@@ -592,9 +580,8 @@ dir.files(tetraFolder, async function (err, files) {
 
 		const tetraPid = path.basename(f);
 
-
 		parsedTetra[tetraPid] = parseTetraPostFile(f);
-		}
+	}
 
 	const migrations = [];
 
@@ -609,11 +596,11 @@ dir.files(tetraFolder, async function (err, files) {
 		.then(parsedPost => migrateTetraPost(tetraPid, parsedPost, parsedTetra))
 		.then(finished => logger.info(`Migrated ${((topicCreatedCount + postCreatedCount + alreadyMigrated) / (postFiles.length) * 100).toFixed(2).padStart(6)}%: NodeBBTopics: ${padFileRelNumber(topicCreatedCount)} | NodeBBPosts: ${padFileRelNumber(postCreatedCount)} | TetraPosts: ${postFiles.length} | ${userCreatedCount} Users`))
 		.catch(err => {
-			if (err.message == `Cannot be migrated yet`) {
-				return
-		}
-			throw err;
-		})
+				if (err.message == `Cannot be migrated yet`) {
+					return
+				}
+				throw err;
+			})
 		)
 	}
 
