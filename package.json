@@ -18,6 +18,8 @@
     "nconf": "^0.11.3",
     "node-dir": "^0.1.17",
     "node-fetch": "^3.1.0",
+    "p-lazy": "^4.0.0",
+    "p-limit": "^4.0.0",
     "turndown": "^7.1.1",
     "winston": "^3.5.0",
     "xregexp": "^5.1.0"
