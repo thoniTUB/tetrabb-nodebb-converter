@@ -225,6 +225,25 @@ function parseTetraPostFile(tetraPostFileName) {
 
 }
 
+function extractTagsFromSubject(subject) {
+	const tags = [];
+	let lastTag = 0;
+
+	while (subject.includes('*')){
+		let tagStart = subject.indexOf('*', lastTag)
+		let tagEnd = subject.indexOf('*', tagStart+1)
+	
+		if (tagEnd > 0) {
+			tags.push(subject.substring(tagStart + 1, tagEnd))
+		}
+		else {
+			break;
+		}
+		subject = subject.substring(0, tagStart) + subject.substring(tagEnd+1)
+	}
+	return [subject, tags];
+}
+
 function parseTetraPost(data) {
 
 	let parsed = {
@@ -277,7 +296,9 @@ function parseTetraPost(data) {
 		}
 		switch (key) {
 			case "SUBJECT":
-				parsed.subject = value;
+				const [subject, tags] = extractTagsFromSubject(value);
+				parsed.subject = subject;
+				parsed.tags = [...parsed.tags, ...tags];
 				break;
 			case "POSTER":
 				parsed.username = sanitizeUsername(value);
@@ -359,9 +380,6 @@ async function preparePostForRequest(parsed) {
 		post.cid = catId;
 		post.timestamp = parsed.timestamp;
 
-		if (post.content.length < 8) {
-			post.content = post.content + "*Platzhalter: Originalpost hatte nur einen zu kurzen Inhalt*"
-		}
 
 		responseAction = (tetraPid, resBody) => {
 			const tid = resBody.response.tid;
@@ -399,6 +417,10 @@ async function preparePostForRequest(parsed) {
 			postCreatedCount++;
 			logger.debug(`Migrated Tetra post ${tetraPid} to Node topic ${tid} as post ${pid}`);
 		}
+	}
+
+	if (post.content.length < 8) {
+		post.content = post.content + '\n*Platzhalter (Migrierter Post hatte einen zu kurzen Inhalt)*';
 	}
 
 
@@ -549,7 +571,8 @@ async function cleanUp() {
 			newbiePostDelayThreshold: 3,
 			newbiePostDelay: 120,
 			initialPostDelay: 10,
-			newbiePostEditDuration: 3600
+			newbiePostEditDuration: 3600,
+			minimumPostLength: 8
 		}).then(_ => {
 
 			logger.info(`Resetting admin settings to to normal operation.`)
@@ -563,7 +586,8 @@ await alterAdminSettings({
 	newbiePostDelayThreshold: 0,
 	newbiePostDelay: 0,
 	initialPostDelay: 0,
-	newbiePostEditDuration: 0
+	newbiePostEditDuration: 0,
+	minimumPostLength: 1
 });
 
 logger.info(`Checking for previous post mappings in file: ${mapping_file}`)
@@ -629,13 +653,14 @@ dir.files(tetraFolder, async function (err, files) {
 	var i, j;
 
 	let errors = [];
+	let migrations = [];
 	try{
 		for (i = 0,j = tetraPidsSorted.length; i < j; i += chunkSize) {
 
-			logger.info(`Preparing chunk ${i}-${i + chunkSize}`);
+			logger.debug(`Preparing chunk ${i}-${i + chunkSize}`);
 
 			const pidChunk = tetraPidsSorted.slice(i, i + chunkSize);
-			const migrations = [];
+			migrations = [];
 			for (const tetraPid of pidChunk) {
 				migrations.push(postPaths[tetraPid]
 					.then(parsedPost => {
@@ -661,6 +686,7 @@ dir.files(tetraFolder, async function (err, files) {
 		await Promise.all(Object.values(tetraPid2nodePid));
 		logger.info(`Migrated ${((topicCreatedCount + postCreatedCount + alreadyMigrated) / (postFiles.length) * 100).toFixed(2).padStart(6)}%: NodeBBTopics: ${padFileRelNumber(topicCreatedCount)} | NodeBBPosts: ${padFileRelNumber(postCreatedCount)} | TetraPosts: ${postFiles.length} | ${userCreatedCount} Users`);
 	} finally {
+		await Promise.allSettled(migrations);
 		await cleanUp();
 	}
 });
