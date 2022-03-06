@@ -10,6 +10,7 @@ import winston from 'winston';
 import nconf from 'nconf';
 import PLazy from 'p-lazy';
 import pLimit from 'p-limit';
+import process from 'process';
 
 // script config
 nconf
@@ -652,16 +653,28 @@ dir.files(tetraFolder, async function (err, files) {
 	const chunkSize = 100;
 	var i, j;
 
+	let aborted = false;
+
+	const handle_sigint = () => {
+		logger.warn(`Received SIGINT. Gracefully finishing current post migrations. Send SIGINT again to kill.`)
+		aborted = true;
+		process.removeListener('SIGINT', handle_sigint);
+	}
+	process.on('SIGINT', handle_sigint);
+
 	let errors = [];
 	let migrations = [];
 	try{
-		for (i = 0,j = tetraPidsSorted.length; i < j; i += chunkSize) {
+		for (i = 0,j = tetraPidsSorted.length; i < j && !aborted; i += chunkSize) {
 
 			logger.debug(`Preparing chunk ${i}-${i + chunkSize}`);
 
 			const pidChunk = tetraPidsSorted.slice(i, i + chunkSize);
 			migrations = [];
 			for (const tetraPid of pidChunk) {
+				if(aborted) {
+					break;
+				}
 				migrations.push(postPaths[tetraPid]
 					.then(parsedPost => {
 						if (!(parsedPost.isThreadStart || parsedPost.previous in tetraPid2nodePid) || tetraPid in tetraPid2nodePid) {
