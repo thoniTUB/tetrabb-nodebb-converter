@@ -20,14 +20,12 @@ nconf
 				alias: 't',
 				describe: 'A master token to access the nodebb api. Master tokens must be created with uid=0',
 				demand: true,
-				parseValues: true
 			},
 			"nodebb-url": {
 				alias: 'u',
 				describe: 'The base url of the nodebb forum to migrate to',
 				demand: true,
 				default: 'http://localhost:4567',
-				parseValues: true
 			},
 			"cat-id": {
 				alias: 'c',
@@ -41,12 +39,17 @@ nconf
 				describe: 'The folder under which to search for tetra forum posts',
 				demand: true,
 				default: '.',
-				parseValues: true
 			},
 			"pid-map": {
 				alias: 'm',
 				describe: 'File to load/save the mapping of migrated post ids (Tetra->NodeBB).',
 				parseValues: true
+			},
+			"relativize": {
+				alias: 'r',
+				describe: "A list of domains to relativize, e.g. 'example.org,example.com' will trim an url 'http://example.com/test' to '/test'",
+				transform: (domainsStr) => domainsStr.split(','),
+				default: []
 			}
 		}
 	)
@@ -57,6 +60,7 @@ const nodebbUrl = nconf.get('nodebb-url');
 const catId = nconf.get('cat-id');
 const tetraFolder = nconf.get('tetra-folder');
 const mapping_file = nconf.get('pid-map') ? nconf.get('pid-map') : path.join(tetraFolder, "migration_map.json");
+const relativizeDomains = Object.assign({}, ...nconf.get('relativize').map(d => {d: new RegExp(`https?://${d}`,'g')}));
 
 // configure logging
 const myFormat = winston.format.printf(({ level, message, timestamp }) => {
@@ -86,6 +90,7 @@ const limit = pLimit(10);
 
 // static
 const nodebbHost = nodebbUrl;
+const subPath = nodebbUrl.replace(/https?:\/\/.*?\//, "/").replace(/\/$/,"");
 const nodeApi = `${nodebbHost}/api/v3`
 const nodebbHeaders = {
 	Authorization: `Bearer ${token}`,
@@ -245,6 +250,18 @@ function extractTagsFromSubject(subject) {
 	return [subject, tags];
 }
 
+function trimRelativisedUrls(content) {
+	let relativizedContent = content;
+	if(relativizeDomains.keys) {
+		relativizeDomains.keys
+			.filter( d => content.includes(d))
+			.forEach(d => relativizedContent = relativizedContent.replace(relativizeDomains[d],''));
+	}
+	// Path to relative images (without domain) must follow a specific convention
+	relativizedContent = relativizedContent.replaceAll('src="/', `src="${subPath}/assets/uploads/files/`);
+	return relativizedContent;
+}
+
 function parseTetraPost(data) {
 
 	let parsed = {
@@ -298,7 +315,7 @@ function parseTetraPost(data) {
 		switch (key) {
 			case "SUBJECT":
 				const [subject, tags] = extractTagsFromSubject(value);
-				parsed.subject = subject;
+				parsed.subject = subject.trim();
 				parsed.tags = [...parsed.tags, ...tags];
 				break;
 			case "POSTER":
@@ -346,7 +363,7 @@ function parseTetraPost(data) {
 	const contentHtml = data.substring(lineStart);
 
 	// Make image urls absolute
-	let contentAbs = contentHtml;
+	let contentAbs = trimRelativisedUrls(contentHtml);
 
 	if (image) {
 		contentAbs += `<br /><br /> <img src="${image}" alt="post image"</img>`
@@ -375,6 +392,10 @@ async function preparePostForRequest(parsed) {
 
 	if (parsed.isThreadStart) {
 		// create a new topic
+
+		if (parsed.subject.length < 3) {
+			parsed.subject += "___" // Placeholder for too short titles
+		}
 
 		path = `${nodeApi}/topics/`
 		post.title = parsed.subject;
@@ -667,7 +688,7 @@ dir.files(tetraFolder, async function (err, files) {
 	try{
 		for (i = 0,j = tetraPidsSorted.length; i < j && !aborted; i += chunkSize) {
 
-			logger.debug(`Preparing chunk ${i}-${i + chunkSize}`);
+			logger.info(`Preparing chunk ${i}-${i + chunkSize}`);
 
 			const pidChunk = tetraPidsSorted.slice(i, i + chunkSize);
 			migrations = [];
@@ -697,7 +718,7 @@ dir.files(tetraFolder, async function (err, files) {
 		}
 		// Wait until all posts resolve
 		await Promise.all(Object.values(tetraPid2nodePid));
-		logger.info(`Migrated ${((topicCreatedCount + postCreatedCount + alreadyMigrated) / (postFiles.length) * 100).toFixed(2).padStart(6)}%: NodeBBTopics: ${padFileRelNumber(topicCreatedCount)} | NodeBBPosts: ${padFileRelNumber(postCreatedCount)} | TetraPosts: ${postFiles.length} | ${userCreatedCount} Users`);
+		logger.info("Finished");
 	} finally {
 		await Promise.allSettled(migrations);
 		await cleanUp();
