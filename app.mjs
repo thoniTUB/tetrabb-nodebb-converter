@@ -125,20 +125,19 @@ async function getOrCreateUserId(username, email) {
 
 	// Check in nodebb if user exists
 	//https://community.nodebb.org/api/user/username/{username}
-	uid = fetch(
+	res = await fetch(
 		`${nodebbHost}/api/user/username/${encodeURIComponent(username)}`,
 		{
 			method: 'GET',
 		}
-	).then(res => {
-		if (res.ok) {
-			// user was already created in nodebb
-			return res.json().then(json => json.uid);
-		}
+	)
+	if (res.ok) {
+		// user was already created in nodebb
+		return res.json().then(json => json.uid);
+	}
 
-		// User needs to be created
-		return createUser(username, email)
-	});
+	// User needs to be created
+	uid = createUser(username, email)
 
 	users[username] = uid;
 
@@ -220,15 +219,11 @@ function sanitizeUsername(username) {
 function parseTetraPostFile(tetraPostFileName) {
 
 	const tetraPid = path.basename(tetraPostFileName)
+	logger.debug(`Parsing ${tetraPid}`);
 
-	return fs.readFile(tetraPostFileName, 'latin1')
-		.then(
-			tetraPostRaw => {
-				logger.debug(`Parsing ${tetraPid}`);
-				return parseTetraPost(tetraPostRaw);
-			}
-		);
+	tetraPostRaw = await fs.readFile(tetraPostFileName, 'latin1')
 
+	return parseTetraPost(tetraPostRaw);
 }
 
 function extractTagsFromSubject(subject) {
@@ -578,6 +573,7 @@ async function alterAdminSettings(settings) {
 }
 
 async function cleanUp() {
+
 	return 	await Promise.all([
 		fs.writeFile(mapping_file, JSON.stringify({ tetraPid2nodePid, tetraPid2nodeTid }))
 			.then(_ => {
